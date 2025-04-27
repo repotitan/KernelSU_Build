@@ -1,0 +1,133 @@
+name: Build Asus X01BD Kernel
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Kolkata
+  ARCH: arm64
+  KERNEL_CONFIG: X01BD_defconfig
+  FULL_CONFIG: arch/arm64/configs/vendor/X01BD_defconfig
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Kernel X01BD
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Checkout Kernel
+      uses: actions/checkout@v4
+      with:
+        repository: divyam234/android_kernel_asus_sdm660
+        path: kernel_workspace/android-kernel
+        ref: lineage-18.1
+        fetch-depth: 1
+        submodules: true
+     
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Setup build kernel environment
+      run: |
+        echo "BUILD_TIME=$(date "+%y%m%d_%H%M")" >> $GITHUB_ENV
+        echo "BUILD_DATE=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+        sudo apt-get update
+        sudo apt-get -y install git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev libgit2-dev
+
+    - name: Download & extract Clang-aosp
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        wget -q -O clang.tar.gz https://gitlab.com/clangsantoni/zyc_clang/-/archive/14/zyc_clang-14.tar.gz
+        tar -zxvf clang.tar.gz
+        mv zyc_clang-14 clang
+
+    - name: Setup Kernel KPROBES
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        echo "CONFIG_KPROBES=y" >> $FULL_CONFIG
+        echo "CONFIG_KSU_WITH_KPROBES=y" >> $FULL_CONFIG
+        echo "CONFIG_HAVE_KPROBES=y" >> $FULL_CONFIG
+        echo "CONFIG_KPROBE_EVENTS=y" >> $FULL_CONFIG
+        echo "CONFIG_KALLSYMS=y" >> $FULL_CONFIG
+        echo "CONFIG_KALLSYMS_ALL=y" >> $FULL_CONFIG
+        echo "CONFIG_LOCALVERSION=-perf" >> $FULL_CONFIG
+
+    - name: Patch Kernel
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/scripts
+        sed -i 's/ -dirty//g' setlocalversion
+        cd ..
+        cat $GITHUB_WORKSPACE/patches/deconfig >> $FULL_CONFIG
+
+    - name:  Setup Configuration for Kernel
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=asus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+        BA_CMD="CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/clang/arm-linux-gnueabi-"
+        EXT_CMD="AR=llvm-ar NM=llvm-nm OBJDUMP=llvm-objdump STRIP=llvm-strip"
+        make O=out ARCH=arm64 CC=clang $BA_CMD $EXT_CMD $KERNEL_CONFIG
+        make -j$(nproc --all) O=out ARCH=arm64 CC=clang $BA_CMD $EXT_CMD
+
+    - name: Prepare AnyKernel3 (${{ matrix.ksu_type }} KSU)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone https://github.com/osm0sis/AnyKernel3 --depth=1 AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+
+    - name: Upload AnyKernel3 (${{ matrix.ksu_type }} KSU)
+      uses: actions/upload-artifact@v4
+      with:
+        name: Asus-X01BD-Kernel-${{ env.BUILD_TIME }}
+        path: kernel_workspace/AnyKernel3/*
+
+    # - name: Compress AnyKernel3 (${{ matrix.ksu_type }} KSU)
+    #   run: |
+    #     mkdir $GITHUB_WORKSPACE/dist
+    #     cd $GITHUB_WORKSPACE/kernel_workspace/AnyKernel3
+    #     zip -r9 $GITHUB_WORKSPACE/dist/AK3-Nameless-OPlus-SM8250-${{ matrix.ksu_type }}-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip ./*
+
+
+    # - name: Upload AnyKernel3 (${{ matrix.ksu_type }} KSU)
+    #   uses: actions/upload-artifact@v4
+    #   with:
+    #     name: kernel-${{ matrix.ksu_type }}
+    #     path: $GITHUB_WORKSPACE/dist/
+
+  # publish-release:
+  #   name: Publish Release
+  #   needs: build
+  #   runs-on: ubuntu-latest
+  #   if: success()
+  #   steps:
+  #     - name: Download All Artifacts
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         path: dist
+  #         pattern: kernel-*
+  #         merge-multiple: true
+
+  #     - name: Create or Update GitHub Release
+  #       uses: ncipollo/release-action@v1
+  #       with:
+  #         tag: latest
+  #         artifacts: "dist/**/*.zip"
+  #         token: ${{ secrets.GITHUB_TOKEN }}
+  #         allowUpdates: true
+  #         replacesArtifacts: true
+  #         prerelease: false
